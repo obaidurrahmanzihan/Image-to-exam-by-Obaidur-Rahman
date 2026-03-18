@@ -13,19 +13,41 @@ import {
   AlertCircle, 
   Loader2, 
   RefreshCcw,
-  Key,
+  Printer,
+  FileDown,
   Trophy,
   BookOpen,
   Send,
-  Clock
+  Clock,
+  Share2,
+  Copy,
+  ExternalLink,
+  LogIn,
+  LogOut,
+  User
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import { Question, UserAnswer, AppPhase } from './types';
+import { db, auth } from './firebase';
+import { 
+  doc, 
+  getDoc, 
+  setDoc, 
+  collection, 
+  serverTimestamp,
+  getDocFromServer
+} from 'firebase/firestore';
+import { 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  onAuthStateChanged,
+  signOut,
+  User as FirebaseUser
+} from 'firebase/auth';
 
 export default function App() {
   const [phase, setPhase] = useState<AppPhase>('setup');
-  const [apiKey, setApiKey] = useState(process.env.GEMINI_API_KEY || '');
   const [images, setImages] = useState<File[]>([]);
   const [imagePreviews, setImagePreviews] = useState<string[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -37,6 +59,134 @@ export default function App() {
   const [duration, setDuration] = useState(10);
   const [processingTime, setProcessingTime] = useState(0);
   const [expectedCount, setExpectedCount] = useState<number | null>(null);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [isSharing, setIsSharing] = useState(false);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+
+  // Auth state listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setUser(user);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Check for shared exam on mount
+  useEffect(() => {
+    const checkSharedExam = () => {
+      const params = new URLSearchParams(window.location.search);
+      const examId = params.get('examId');
+      if (examId && phase === 'setup') {
+        loadSharedExam(examId);
+      }
+    };
+    
+    if (isAuthReady) {
+      checkSharedExam();
+    }
+    // Also listen for popstate in case of navigation
+    window.addEventListener('popstate', checkSharedExam);
+    return () => window.removeEventListener('popstate', checkSharedExam);
+  }, [phase, isAuthReady]);
+
+  // Test connection to Firestore
+  useEffect(() => {
+    const testConnection = async () => {
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if(error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration.");
+        }
+      }
+    };
+    testConnection();
+  }, []);
+
+  const loadSharedExam = async (id: string) => {
+    setError(null);
+    setPhase('loading');
+    setLoadingMessage('Loading shared exam...');
+    console.log('Fetching shared exam from Firestore:', id);
+    
+    try {
+      const examDoc = await getDoc(doc(db, 'exams', id));
+      
+      if (!examDoc.exists()) {
+        console.warn(`Exam not found: ${id}`);
+        throw new Error('Exam not found. The link might be incorrect or the exam was deleted.');
+      }
+      
+      const data = examDoc.data();
+      console.log('Exam data loaded:', data);
+      
+      if (!data.questions || data.questions.length === 0) {
+        throw new Error('This exam has no questions.');
+      }
+
+      setQuestions(data.questions);
+      setUserAnswers(data.questions.map((_: any, idx: number) => ({
+        questionIndex: idx,
+        selectedOption: null
+      })));
+      setDuration(data.duration || 30);
+      setTimeLeft((data.duration || 30) * 60);
+      setPhase('exam');
+      setLoadingMessage('Exam loaded!');
+    } catch (err: any) {
+      console.error('Failed to load shared exam:', err);
+      setError(err.message || 'Could not load the shared exam. The link may be invalid.');
+      setPhase('setup');
+    }
+  };
+
+  const handleShare = async () => {
+    setIsSharing(true);
+    try {
+      const examId = crypto.randomUUID();
+      await setDoc(doc(db, 'exams', examId), {
+        questions,
+        duration,
+        createdAt: serverTimestamp(),
+        authorId: user?.uid || 'anonymous'
+      });
+      
+      const url = `${window.location.origin}${window.location.pathname}?examId=${examId}`;
+      setShareUrl(url);
+    } catch (err: any) {
+      console.error('Error sharing exam:', err);
+      setError('Failed to generate sharing link. ' + (err.message || ''));
+    } finally {
+      setIsSharing(false);
+    }
+  };
+
+  const handleLogin = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (err: any) {
+      setError('Login failed: ' + err.message);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (err: any) {
+      setError('Logout failed: ' + err.message);
+    }
+  };
+
+  const [copied, setCopied] = useState(false);
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollEndRef = useRef<HTMLDivElement>(null);
@@ -107,8 +257,9 @@ export default function App() {
   };
 
   const processExam = async () => {
-    if (!apiKey) {
-      setError("Please provide a Gemini API Key.");
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) {
+      setError("Gemini API Key is not configured in the environment.");
       return;
     }
     if (images.length === 0) {
@@ -124,7 +275,7 @@ export default function App() {
     setIsStreaming(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = new GoogleGenAI({ apiKey: key });
       
       const imageParts = await Promise.all(images.map(async (img) => {
         const base64Data = await fileToBase64(img);
@@ -136,11 +287,28 @@ export default function App() {
         };
       }));
 
-      const prompt = `Read these exam paper images. Extract the questions, multiple-choice options, solve the correct answer (if not marked), and provide a short explanation for each. 
-      ${expectedCount ? `I expect to find exactly ${expectedCount} questions in these images. Please ensure you identify and extract all of them.` : ''}
+      const prompt = `You are an expert exam paper analyzer. Your task is to accurately transcribe and solve questions from the provided images.
+      
+      CRITICAL INSTRUCTIONS FOR IMAGE QUALITY:
+      - HANDWRITING: Carefully decipher handwritten text, including cursive or messy scripts. Use context to resolve ambiguous characters.
+      - LIGHTING & QUALITY: The images may have poor lighting, shadows, glare, or be from low-quality paper. Apply advanced visual reasoning to filter out noise and focus on the actual content.
+      - MULTIPLE IMAGES: These images represent a single exam. Maintain continuity across them.
+      
+      LANGUAGE & EXPLANATION RULES:
+      - If the question is in Bangla: Provide the explanation entirely in Bangla.
+      - If the question is in English: Provide the explanation in both English and Bangla (Bilingual).
+      
+      TASK:
+      1. Extract every question and its multiple-choice options.
+      2. Identify or solve for the correct answer.
+      3. Provide a concise, helpful explanation for the answer following the language rules above.
+      
+      ${expectedCount ? `EXPECTATION: I expect to find exactly ${expectedCount} questions. If some are hard to read, try your best to reconstruct them using available visual cues.` : ''}
+      
+      OUTPUT FORMAT:
       Return the result as a sequence of JSON objects, one per line. 
       Each object must follow this structure: {"question": "...", "options": ["A", "B", "C", "D"], "correctAnswer": "...", "explanation": "..."}
-      Do not include any markdown tags, preamble, or wrap the objects in an array. Just output one valid JSON object per line.`;
+      Do not include markdown tags, code blocks, preamble, or wrap the objects in an array. Just output one valid JSON object per line.`;
 
       const stream = await ai.models.generateContentStream({
         model: "gemini-3-flash-preview",
@@ -231,6 +399,11 @@ export default function App() {
   };
 
   const restart = () => {
+    // Clear the examId from URL without refreshing
+    const url = new URL(window.location.href);
+    url.searchParams.delete('examId');
+    window.history.pushState({}, '', url.toString());
+    
     setPhase('setup');
     setImages([]);
     setImagePreviews([]);
@@ -240,6 +413,14 @@ export default function App() {
     setIsStreaming(false);
     setTimeLeft(null);
     setExpectedCount(null);
+    setShareUrl(null);
+  };
+
+  const handlePrint = () => {
+    // Small delay to ensure any hover states or active animations settle
+    setTimeout(() => {
+      window.print();
+    }, 100);
   };
 
   const calculateResults = () => {
@@ -261,6 +442,11 @@ export default function App() {
     return { correct, wrong, skipped, total: questions.length };
   };
 
+  const getBanglaLetter = (index: number) => {
+    const letters = ['ক)', 'খ)', 'গ)', 'ঘ)', 'ঙ)', 'চ)', 'ছ)', 'জ)'];
+    return letters[index] || `${index + 1})`;
+  };
+
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -269,6 +455,20 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-indigo-100 pb-24">
+      {/* Print-only Header */}
+      <div className="hidden print:block mb-8 border-b-2 border-slate-900 pb-4">
+        <div className="flex justify-between items-end">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900">Exam Paper</h1>
+            <p className="text-slate-600">Generated by ExamGenie AI</p>
+          </div>
+          <div className="text-right text-sm text-slate-500">
+            <p>Date: {new Date().toLocaleDateString()}</p>
+            <p>Duration: {duration} Minutes</p>
+          </div>
+        </div>
+      </div>
+
       {/* Header */}
       <header className="bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-30">
         <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
@@ -286,6 +486,19 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-4">
+            {user ? (
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 overflow-hidden border border-indigo-200">
+                  {user.photoURL ? <img src={user.photoURL} alt={user.displayName || ''} className="w-full h-full object-cover" /> : <User size={16} />}
+                </div>
+                <button onClick={handleLogout} className="text-xs font-bold text-slate-500 hover:text-red-600 transition-colors">Logout</button>
+              </div>
+            ) : (
+              <button onClick={handleLogin} className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-700 hover:bg-slate-50 transition-all shadow-sm">
+                <LogIn size={14} className="text-indigo-600" />
+                Login
+              </button>
+            )}
             {phase === 'exam' && timeLeft !== null && (
               <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg font-mono font-bold text-sm ${timeLeft < 60 ? 'bg-red-100 text-red-600 animate-pulse' : 'bg-slate-100 text-slate-700'}`}>
                 <Clock size={16} />
@@ -303,6 +516,18 @@ export default function App() {
             )}
           </div>
         </div>
+        
+        {/* Progress Bar in Header */}
+        {phase === 'exam' && isStreaming && expectedCount && (
+          <div className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-100 overflow-hidden">
+            <motion.div 
+              className="h-full bg-indigo-600"
+              initial={{ width: 0 }}
+              animate={{ width: `${Math.min((questions.length / expectedCount) * 100, 100)}%` }}
+              transition={{ type: "spring", bounce: 0, duration: 0.5 }}
+            />
+          </div>
+        )}
       </header>
 
       <main className="max-w-3xl mx-auto px-4 py-8">
@@ -320,24 +545,6 @@ export default function App() {
                 <h2 className="text-2xl font-bold mb-6">Create Your Exam</h2>
                 
                 <div className="space-y-6">
-                  {/* API Key Section */}
-                  <div className="space-y-2">
-                    <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                      <Key size={16} className="text-indigo-500" />
-                      Gemini API Key
-                    </label>
-                    <input 
-                      type="password"
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder="Enter your API key..."
-                      className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all bg-slate-50"
-                    />
-                    <p className="text-xs text-slate-500">
-                      Your key is stored locally in your browser and used only for requests.
-                    </p>
-                  </div>
-
                   {/* Duration Section */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="space-y-2">
@@ -424,7 +631,7 @@ export default function App() {
 
                   <button 
                     onClick={processExam}
-                    disabled={images.length === 0 || !apiKey}
+                    disabled={images.length === 0}
                     className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold rounded-2xl shadow-lg shadow-indigo-200 transition-all flex items-center justify-center gap-2"
                   >
                     <FileText size={20} />
@@ -451,9 +658,28 @@ export default function App() {
                   <Loader2 size={32} className="animate-pulse" />
                 </div>
               </div>
-              <div className="text-center">
+              <div className="text-center w-full max-w-md">
                 <h3 className="text-xl font-bold text-slate-800">{loadingMessage}</h3>
-                <div className="mt-4 flex flex-col items-center gap-3">
+                
+                {/* Progress Bar */}
+                <div className="mt-6 w-full bg-slate-100 rounded-full h-3 overflow-hidden border border-slate-200">
+                  <motion.div 
+                    className="h-full bg-indigo-600"
+                    initial={{ width: 0 }}
+                    animate={{ 
+                      width: expectedCount 
+                        ? `${Math.min((questions.length / expectedCount) * 100, 100)}%`
+                        : `${Math.min(95, (processingTime / 30) * 100)}%` 
+                    }}
+                    transition={{ type: "spring", bounce: 0, duration: 0.5 }}
+                  />
+                </div>
+                <div className="flex justify-between mt-2 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                  <span>Starting Analysis</span>
+                  <span>{expectedCount ? `${questions.length} / ${expectedCount} Questions` : 'Processing...'}</span>
+                </div>
+
+                <div className="mt-8 flex flex-col items-center gap-3">
                   <div className="flex flex-wrap justify-center gap-2">
                     <div className="px-4 py-2 bg-indigo-50 rounded-full text-indigo-600 font-mono font-bold text-sm flex items-center gap-2 border border-indigo-100">
                       <Clock size={14} className="animate-pulse" />
@@ -480,13 +706,31 @@ export default function App() {
               animate={{ opacity: 1 }}
               className="space-y-8"
             >
-              <div className="space-y-8">
+              <div className="flex justify-end gap-2 no-print">
+                <button 
+                  onClick={handleShare}
+                  disabled={isSharing}
+                  className="px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl font-bold hover:bg-indigo-100 transition-all flex items-center gap-2 text-sm"
+                >
+                  {isSharing ? <Loader2 size={16} className="animate-spin" /> : <Share2 size={16} />}
+                  Share Test
+                </button>
+                <button 
+                  onClick={handlePrint}
+                  className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold hover:bg-slate-200 transition-all flex items-center gap-2 text-sm"
+                >
+                  <FileDown size={16} />
+                  Export as PDF
+                </button>
+              </div>
+              
+              <div className="space-y-8 print-two-columns">
                 {questions.map((q, qIdx) => (
                   <motion.div
                     key={qIdx}
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="bg-white rounded-3xl p-8 shadow-sm border border-slate-200"
+                    className="bg-white rounded-3xl p-8 shadow-sm border border-slate-200 exam-question-item"
                   >
                     <div className="flex items-center justify-between mb-6">
                       <span className="text-xs font-bold text-indigo-600 uppercase tracking-widest">
@@ -522,7 +766,8 @@ export default function App() {
                               ? 'bg-indigo-600 text-white' 
                               : 'bg-slate-100 text-slate-500 group-hover:bg-slate-200'}
                           `}>
-                            {String.fromCharCode(65 + oIdx)}
+                            <span className="print:hidden">{String.fromCharCode(65 + oIdx)}</span>
+                            <span className="hidden print:inline text-red-500">{getBanglaLetter(oIdx)}</span>
                           </div>
                           <span className={`font-medium ${userAnswers[qIdx]?.selectedOption === option ? 'text-indigo-900' : 'text-slate-700'}`}>
                             {option}
@@ -535,9 +780,26 @@ export default function App() {
               </div>
 
               {isStreaming && (
-                <div className="flex items-center justify-center py-8 gap-3 text-indigo-600 font-medium">
-                  <Loader2 size={20} className="animate-spin" />
-                  AI is discovering more questions... ({questions.length} found)
+                <div className="space-y-4 py-8 no-print">
+                  <div className="flex items-center justify-center gap-3 text-indigo-600 font-medium">
+                    <Loader2 size={20} className="animate-spin" />
+                    AI is discovering more questions... ({questions.length} found)
+                  </div>
+                  {expectedCount && (
+                    <div className="max-w-xs mx-auto">
+                      <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden border border-slate-200">
+                        <motion.div 
+                          className="h-full bg-indigo-600"
+                          initial={{ width: 0 }}
+                          animate={{ width: `${Math.min((questions.length / expectedCount) * 100, 100)}%` }}
+                          transition={{ type: "spring", bounce: 0, duration: 0.5 }}
+                        />
+                      </div>
+                      <p className="text-[10px] text-center mt-1 font-bold text-slate-400 uppercase tracking-widest">
+                        {Math.round((questions.length / expectedCount) * 100)}% Complete
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -555,7 +817,7 @@ export default function App() {
                   </div>
                   <button 
                     onClick={processExam}
-                    className="px-6 py-2 bg-amber-600 text-white rounded-xl font-bold hover:bg-amber-700 transition-all flex items-center gap-2"
+                    className="px-6 py-2 bg-amber-600 text-white rounded-xl font-bold hover:bg-amber-700 transition-all flex items-center gap-2 no-print"
                   >
                     <RefreshCcw size={18} />
                     Re-analyze Image
@@ -626,17 +888,35 @@ export default function App() {
                   </div>
                 </div>
 
-                <button 
-                  onClick={restart}
-                  className="mt-8 px-8 py-3 border-2 border-slate-200 rounded-xl font-bold text-slate-600 hover:bg-slate-50 transition-all"
-                >
-                  Try Another Exam
-                </button>
+                <div className="flex flex-wrap justify-center gap-4 mt-8 no-print">
+                  <button 
+                    onClick={handleShare}
+                    disabled={isSharing}
+                    className="px-8 py-3 bg-indigo-50 text-indigo-600 rounded-xl font-bold hover:bg-indigo-100 transition-all flex items-center gap-2"
+                  >
+                    {isSharing ? <Loader2 size={18} className="animate-spin" /> : <Share2 size={18} />}
+                    Share Test Link
+                  </button>
+                  <button 
+                    onClick={restart}
+                    className="px-8 py-3 border-2 border-slate-200 rounded-xl font-bold text-slate-600 hover:bg-slate-50 transition-all flex items-center gap-2"
+                  >
+                    <RefreshCcw size={18} />
+                    Try Another Exam
+                  </button>
+                  <button 
+                    onClick={handlePrint}
+                    className="px-8 py-3 bg-slate-800 text-white rounded-xl font-bold hover:bg-slate-900 transition-all flex items-center gap-2"
+                  >
+                    <FileDown size={18} />
+                    Export results as PDF
+                  </button>
+                </div>
               </div>
 
               {/* Detailed Review */}
-              <div className="space-y-6">
-                <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+              <div className="space-y-6 print-two-columns">
+                <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2 no-print">
                   <FileText size={24} className="text-indigo-600" />
                   Detailed Review
                 </h3>
@@ -647,7 +927,7 @@ export default function App() {
                   const isSkipped = userAns === undefined || userAns === null;
 
                   return (
-                    <div key={idx} className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4">
+                    <div key={idx} className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4 detailed-review-item">
                       <div className="flex items-start justify-between gap-4">
                         <h4 className="font-bold text-slate-800 leading-relaxed">
                           <span className="text-slate-400 mr-2">{idx + 1}.</span>
@@ -674,7 +954,7 @@ export default function App() {
                           if (isCorrectOpt) {
                             borderClass = 'border-emerald-500';
                             bgClass = 'bg-emerald-50';
-                            textClass = 'text-emerald-700 font-bold';
+                            textClass = 'text-emerald-700 font-bold print:text-red-600';
                           } else if (isSelected && !isCorrect) {
                             borderClass = 'border-red-500';
                             bgClass = 'bg-red-50';
@@ -683,6 +963,7 @@ export default function App() {
 
                           return (
                             <div key={oIdx} className={`p-3 rounded-xl border-2 text-sm ${borderClass} ${bgClass} ${textClass}`}>
+                              <span className="hidden print:inline mr-1">{getBanglaLetter(oIdx)}</span>
                               {opt}
                             </div>
                           );
@@ -703,6 +984,51 @@ export default function App() {
                 })}
               </div>
             </motion.div>
+          )}
+        </AnimatePresence>
+        {/* Share Modal */}
+        <AnimatePresence>
+          {shareUrl && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center px-4 bg-slate-900/50 backdrop-blur-sm">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl border border-slate-200"
+              >
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="w-12 h-12 bg-indigo-100 rounded-2xl flex items-center justify-center text-indigo-600">
+                    <Share2 size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-slate-800">Share Online Test</h3>
+                    <p className="text-sm text-slate-500">Anyone with this link can take the test.</p>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 break-all font-mono text-xs text-slate-600">
+                    {shareUrl}
+                  </div>
+                  
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => copyToClipboard(shareUrl)}
+                      className={`flex-1 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 ${copied ? 'bg-emerald-600 text-white' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
+                    >
+                      {copied ? <CheckCircle2 size={18} /> : <Copy size={18} />}
+                      {copied ? 'Copied!' : 'Copy Link'}
+                    </button>
+                    <button
+                      onClick={() => setShareUrl(null)}
+                      className="px-6 py-3 border-2 border-slate-200 rounded-xl font-bold text-slate-600 hover:bg-slate-50 transition-all"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
           )}
         </AnimatePresence>
       </main>

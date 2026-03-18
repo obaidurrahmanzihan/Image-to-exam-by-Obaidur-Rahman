@@ -22,3 +22,133 @@
 .markdown-body strong {
   @apply font-bold text-slate-900;
 }
+
+@media print {
+  @page {
+    size: A4;
+    margin: 20mm;
+  }
+
+  body {
+    background: white !important;
+    padding: 0 !important;
+  }
+
+  header, 
+  .fixed, 
+  .no-print {
+    display: none !important;
+  }
+
+  main {
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .bg-white {
+    box-shadow: none !important;
+    border: 1px solid #e2e8f0 !important;
+    padding: 0 !important;
+    margin-bottom: 2rem !important;
+  }
+
+  .rounded-3xl {
+    border-radius: 0 !important;
+  }
+
+  .shadow-sm {
+    box-shadow: none !important;
+  }
+
+  h2, h3, h4 {
+    color: black !important;
+  }
+
+  .detailed-review-item {
+    page-break-inside: avoid;
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 2rem;
+    margin-bottom: 2rem;
+  }
+
+  .exam-question-item {
+    page-break-inside: avoid;
+    margin-bottom: 2rem !important;
+  }
+
+  .exam-question-item button {
+    border-color: #e2e8f0 !important;
+    background: transparent !important;
+    color: black !important;
+    display: flex !important; /* Ensure they are visible */
+    pointer-events: none;
+  }
+
+  .exam-question-item button div {
+    background: #f1f5f9 !important;
+    color: #64748b !important;
+  }
+
+  /* Hide "Saved" indicator during print */
+  .exam-question-item .flex.items-center.gap-1.text-emerald-600 {
+    display: none !important;
+  }
+
+  .print-two-columns {
+    column-count: 2;
+    column-gap: 30px;
+    column-rule: 1px solid #e2e8f0;
+    width: 100%;
+  }
+
+  .detailed-review-item, 
+  .exam-question-item {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-bottom: 15px !important;
+    padding: 0 !important;
+    border: none !important;
+    border-bottom: 1px dashed #e2e8f0 !important;
+    padding-bottom: 10px !important;
+  }
+
+  .detailed-review-item h4,
+  .exam-question-item h3 {
+    font-size: 12px !important;
+    margin-bottom: 8px !important;
+  }
+
+  .detailed-review-item .grid,
+  .exam-question-item .space-y-3 {
+    display: block !important;
+    margin-top: 5px !important;
+  }
+
+  .detailed-review-item .grid > div,
+  .exam-question-item button {
+    display: inline-block !important;
+    width: 48% !important;
+    margin-right: 2% !important;
+    margin-bottom: 5px !important;
+    padding: 2px 5px !important;
+    border: none !important;
+    font-size: 11px !important;
+    background: transparent !important;
+  }
+
+  .detailed-review-item .bg-indigo-50\/50 {
+    display: none !important; /* Hide explanations in compact print to match image */
+  }
+
+  .detailed-review-item .shrink-0,
+  .detailed-review-item span.px-3 {
+    display: none !important; /* Hide status badges */
+  }
+
+  .print-bangla-letter {
+    font-weight: bold;
+    margin-right: 4px;
+    color: #ef4444; /* Match red color in image for options */
+  }
+}

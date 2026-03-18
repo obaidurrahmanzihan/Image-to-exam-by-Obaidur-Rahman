@@ -1,0 +1,56 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: exams
+    // Document ID: auto-generated
+    // Fields:
+    //   - questions: list of objects (required)
+    //   - duration: number (required)
+    //   - createdAt: timestamp (optional)
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "zihanvai21@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidExam(data) {
+      return data.questions is list &&
+             data.questions.size() > 0 &&
+             data.questions.size() <= 100 &&
+             data.duration is number &&
+             data.duration > 0 &&
+             data.duration <= 180;
+    }
+
+    match /exams/{examId} {
+      // Anyone can read an exam if they have the link
+      allow get: if true;
+      
+      // Anyone can create an exam (to share it)
+      // We validate the structure to prevent malicious data
+      allow create: if isValidExam(request.resource.data);
+      
+      // Only admins can list or delete exams
+      allow list, delete: if isAdmin();
+      
+      // Exams are immutable once created
+      allow update: if false;
+    }
+
+    match /users/{userId} {
+      allow read, write: if request.auth.uid == userId || isAdmin();
+    }
+  }
+}
